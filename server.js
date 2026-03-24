@@ -1,51 +1,50 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
 const xlsx = require('xlsx');
 const axios = require('axios');
 const cron = require('node-cron');
 const webpush = require('web-push');
 const cors = require('cors');
+const fs = require('fs');
 const path = require('path');
 
 const app = express();
 app.use(express.json());
 app.use(cors());
-app.use(express.static('public')); // для статических файлов клиента
+app.use(express.static('public'));
 
-// ----- Настройка web-push (сгенерируем ключи позже) -----
+// ----- Папка для хранения данных -----
+const DATA_DIR = path.join(__dirname, 'data');
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR);
+}
+
+// Функции для работы с JSON-хранилищем
+function readJson(fileName, defaultValue = {}) {
+  const filePath = path.join(DATA_DIR, fileName);
+  if (!fs.existsSync(filePath)) {
+    return defaultValue;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (e) {
+    return defaultValue;
+  }
+}
+
+function writeJson(fileName, data) {
+  const filePath = path.join(DATA_DIR, fileName);
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// ----- Настройка web-push (генерируем ключи) -----
 const vapidKeys = webpush.generateVAPIDKeys();
 webpush.setVapidDetails(
-  'mailto:your-email@example.com', // замените на свой email
+  'mailto:your-email@example.com', // замените на ваш email
   vapidKeys.publicKey,
   vapidKeys.privateKey
 );
 console.log('Публичный ключ для клиента:', vapidKeys.publicKey);
 console.log('Приватный ключ (не теряйте):', vapidKeys.privateKey);
-
-// ----- База данных SQLite -----
-const db = new sqlite3.Database('./schedule.db');
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS subscriptions (
-    endpoint TEXT PRIMARY KEY,
-    auth TEXT,
-    p256dh TEXT
-  )`);
-  db.run(`CREATE TABLE IF NOT EXISTS schedule (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT,
-    pair_number INTEGER,
-    room TEXT,
-    group_name TEXT,
-    teacher TEXT,
-    UNIQUE(date, pair_number, group_name)
-  )`);
-  db.run(`CREATE TABLE IF NOT EXISTS last_checks (
-    id INTEGER PRIMARY KEY CHECK (id=1),
-    today_hash TEXT,
-    tomorrow_hash TEXT
-  )`);
-  db.run(`INSERT OR IGNORE INTO last_checks (id, today_hash, tomorrow_hash) VALUES (1, '', '')`);
-});
 
 // ----- Функция извлечения даты из имени файла -----
 function extractDateFromFilename(filename) {
@@ -53,12 +52,10 @@ function extractDateFromFilename(filename) {
   const match = filename.match(/\d{2,4}[.-]\d{1,2}[.-]\d{1,4}|\d{8}|\d{2}\.\d{2}\.\d{4}/);
   if (!match) return null;
   let dateStr = match[0];
-  // Пытаемся распарсить
   let day, month, year;
   if (dateStr.includes('.') || dateStr.includes('-')) {
     let parts = dateStr.split(/[.-]/);
     if (parts.length === 3) {
-      // Предполагаем, что первая часть — день, вторая — месяц, третья — год или наоборот
       if (parts[0].length === 4) {
         year = parts[0];
         month = parts[1];
@@ -70,7 +67,6 @@ function extractDateFromFilename(filename) {
       }
     }
   } else if (dateStr.length === 8) {
-    // формат YYYYMMDD
     year = dateStr.slice(0,4);
     month = dateStr.slice(4,6);
     day = dateStr.slice(6,8);
@@ -81,7 +77,7 @@ function extractDateFromFilename(filename) {
   return null;
 }
 
-// ----- Функция скачивания и парсинга файла по ссылке -----
+// ----- Функция скачивания и парсинга Excel -----
 async function downloadAndParseExcel(downloadUrl) {
   try {
     const response = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
@@ -90,16 +86,15 @@ async function downloadAndParseExcel(downloadUrl) {
     workbook.SheetNames.forEach((sheetName, index) => {
       const sheet = workbook.Sheets[sheetName];
       const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-      // rows — массив массивов, без заголовков
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         if (row.length >= 3) {
           const room = row[0] ? row[0].toString().trim() : '';
           const group = row[1] ? row[1].toString().trim() : '';
           const teacher = row[2] ? row[2].toString().trim() : '';
-          if (group !== '') { // пропускаем пустые строки
+          if (group !== '') {
             result.push({
-              pair_number: index + 1, // номер пары = номер листа + 1
+              pair_number: index + 1,
               room,
               group_name: group,
               teacher
@@ -115,22 +110,8 @@ async function downloadAndParseExcel(downloadUrl) {
   }
 }
 
-// ----- Получение прямых ссылок на файлы из папки -----
-// Упрощённый подход: предполагаем, что файлы имеют постоянные имена с датами, и мы сами формируем URL
-// Но для универсальности попробуем спарсить страницу папки (только если папка открыта)
-// Лучше всего, если вы будете указывать ссылки на файлы вручную через переменные окружения.
-// Сделаем так: зададим ID папки и будем использовать Google Drive API без авторизации (но это нестабильно).
-// Вместо этого, я предлагаю вам задать прямые ссылки на файлы в переменных окружения.
-// Для простоты, я сделаю так: сервер будет ожидать, что в папке лежат файлы, имена которых содержат дату.
-// Чтобы получить список файлов, используем Google Drive API v3 с публичным доступом.
-// Вам нужно будет получить API ключ Google (бесплатно) и включить Drive API.
-
-// ----- Настройка Google Drive API -----
-// 1. Зайдите на https://console.cloud.google.com/
-// 2. Создайте проект, включите Google Drive API
-// 3. Создайте API ключ (ограничьте его для использования только Drive API)
-// 4. Вставьте ключ в переменную ниже
-const GOOGLE_API_KEY = 'ВАШ_API_КЛЮЧ'; // замените
+// ----- Google Drive API -----
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || 'ВАШ_API_КЛЮЧ';
 const FOLDER_ID = '1bdHCozxsjzy7BVd76sBTTK_ckhZ78wbo'; // ID вашей папки
 
 async function getFileListInFolder() {
@@ -146,6 +127,18 @@ async function getFileListInFolder() {
 
 function getDirectDownloadUrl(fileId) {
   return `https://drive.google.com/uc?export=download&id=${fileId}`;
+}
+
+// ----- Сохранение расписания для группы -----
+function saveScheduleForGroup(date, group, scheduleData) {
+  const fileName = `schedule_${date}_${group}.json`;
+  writeJson(fileName, scheduleData);
+}
+
+// ----- Получение расписания для группы -----
+function getScheduleForGroup(date, group) {
+  const fileName = `schedule_${date}_${group}.json`;
+  return readJson(fileName, []);
 }
 
 // ----- Основная функция проверки расписания -----
@@ -168,11 +161,6 @@ async function checkAndUpdateSchedule() {
     if (fileDate.getTime() === tomorrow.getTime()) tomorrowFile = file;
   }
 
-  if (!todayFile && !tomorrowFile) {
-    console.log('Файлы на сегодня/завтра не найдены');
-    return;
-  }
-
   // Функция обработки одного файла
   async function processFile(file, dateLabel) {
     if (!file) return null;
@@ -180,66 +168,66 @@ async function checkAndUpdateSchedule() {
     const scheduleData = await downloadAndParseExcel(url);
     if (!scheduleData) return null;
 
-    // Сохраняем в БД, предварительно очистив старые записи за эту дату
-    const dateStr = extractDateFromFilename(file.name).toISOString().slice(0,10);
-    await db.run(`DELETE FROM schedule WHERE date = ?`, [dateStr]);
-    const stmt = db.prepare(`INSERT INTO schedule (date, pair_number, room, group_name, teacher) VALUES (?, ?, ?, ?, ?)`);
-    for (const item of scheduleData) {
-      stmt.run(dateStr, item.pair_number, item.room, item.group_name, item.teacher);
-    }
-    stmt.finalize();
+    const fileDate = extractDateFromFilename(file.name);
+    const dateStr = fileDate.toISOString().slice(0,10);
 
-    // Вычисляем хеш для сравнения
+    // Группируем по группам и сохраняем для каждой
+    const groupsMap = new Map();
+    for (const item of scheduleData) {
+      const group = item.group_name;
+      if (!groupsMap.has(group)) groupsMap.set(group, []);
+      groupsMap.get(group).push({
+        pair_number: item.pair_number,
+        room: item.room,
+        teacher: item.teacher
+      });
+    }
+    for (const [group, pairs] of groupsMap.entries()) {
+      saveScheduleForGroup(dateStr, group, pairs);
+    }
+
+    // Вычисляем хеш для сравнения (по всем данным, чтобы отследить изменение)
     const hash = require('crypto').createHash('md5').update(JSON.stringify(scheduleData)).digest('hex');
     return hash;
   }
 
   // Получаем старые хеши
-  db.get(`SELECT today_hash, tomorrow_hash FROM last_checks WHERE id = 1`, async (err, row) => {
-    if (err) return;
-    const oldTodayHash = row.today_hash;
-    const oldTomorrowHash = row.tomorrow_hash;
+  const lastChecks = readJson('last_checks.json', { today_hash: '', tomorrow_hash: '' });
+  const oldTodayHash = lastChecks.today_hash;
+  const oldTomorrowHash = lastChecks.tomorrow_hash;
 
-    const newTodayHash = todayFile ? await processFile(todayFile, 'today') : null;
-    const newTomorrowHash = tomorrowFile ? await processFile(tomorrowFile, 'tomorrow') : null;
+  const newTodayHash = todayFile ? await processFile(todayFile, 'today') : null;
+  const newTomorrowHash = tomorrowFile ? await processFile(tomorrowFile, 'tomorrow') : null;
 
-    // Обновляем хеши
-    db.run(`UPDATE last_checks SET today_hash = ?, tomorrow_hash = ? WHERE id = 1`, [newTodayHash || '', newTomorrowHash || '']);
+  // Обновляем хеши
+  const newLastChecks = {
+    today_hash: newTodayHash || '',
+    tomorrow_hash: newTomorrowHash || ''
+  };
+  writeJson('last_checks.json', newLastChecks);
 
-    // Отправляем уведомления при изменениях
-    if (newTodayHash && newTodayHash !== oldTodayHash) {
-      sendNotificationToAll('Расписание на сегодня обновлено!');
-    }
-    if (newTomorrowHash && newTomorrowHash !== oldTomorrowHash) {
-      sendNotificationToAll('Расписание на завтра обновлено!');
-    }
-  });
+  // Отправляем уведомления при изменениях
+  if (newTodayHash && newTodayHash !== oldTodayHash) {
+    sendNotificationToAll('Расписание на сегодня обновлено!');
+  }
+  if (newTomorrowHash && newTomorrowHash !== oldTomorrowHash) {
+    sendNotificationToAll('Расписание на завтра обновлено!');
+  }
 }
 
 // ----- Отправка уведомлений всем подписанным клиентам -----
 async function sendNotificationToAll(message) {
-  const subscriptions = await new Promise((resolve) => {
-    db.all(`SELECT endpoint, auth, p256dh FROM subscriptions`, (err, rows) => {
-      if (err) resolve([]);
-      else resolve(rows);
-    });
-  });
+  const subscriptions = readJson('subscriptions.json', []);
   const payload = JSON.stringify({ title: 'Обновление расписания', body: message });
   for (const sub of subscriptions) {
-    const pushSubscription = {
-      endpoint: sub.endpoint,
-      keys: {
-        auth: sub.auth,
-        p256dh: sub.p256dh
-      }
-    };
     try {
-      await webpush.sendNotification(pushSubscription, payload);
+      await webpush.sendNotification(sub, payload);
     } catch (err) {
       console.error('Ошибка отправки уведомления:', err);
       if (err.statusCode === 410) {
         // Подписка истекла, удаляем
-        db.run(`DELETE FROM subscriptions WHERE endpoint = ?`, [sub.endpoint]);
+        const updated = subscriptions.filter(s => s.endpoint !== sub.endpoint);
+        writeJson('subscriptions.json', updated);
       }
     }
   }
@@ -252,22 +240,23 @@ app.get('/api/public-key', (req, res) => {
 
 app.post('/api/subscribe', (req, res) => {
   const subscription = req.body;
-  const endpoint = subscription.endpoint;
-  const auth = subscription.keys.auth;
-  const p256dh = subscription.keys.p256dh;
-  db.run(`INSERT OR REPLACE INTO subscriptions (endpoint, auth, p256dh) VALUES (?, ?, ?)`, [endpoint, auth, p256dh], (err) => {
-    if (err) return res.status(500).send('Ошибка сохранения');
-    res.status(201).json({});
-  });
+  let subscriptions = readJson('subscriptions.json', []);
+  // Заменяем, если уже есть
+  const index = subscriptions.findIndex(s => s.endpoint === subscription.endpoint);
+  if (index !== -1) {
+    subscriptions[index] = subscription;
+  } else {
+    subscriptions.push(subscription);
+  }
+  writeJson('subscriptions.json', subscriptions);
+  res.status(201).json({});
 });
 
 app.get('/api/schedule/:group/:date', (req, res) => {
   const group = req.params.group;
   const date = req.params.date;
-  db.all(`SELECT pair_number, room, teacher FROM schedule WHERE date = ? AND group_name = ? ORDER BY pair_number`, [date, group], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
+  const schedule = getScheduleForGroup(date, group);
+  res.json(schedule);
 });
 
 // Запуск периодической проверки каждый час
