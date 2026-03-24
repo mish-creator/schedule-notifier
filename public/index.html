@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Моё расписание</title>
+  <link rel="manifest" href="/manifest.json">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 16px; background: #f2f2f7; color: #000; }
+    .container { max-width: 600px; margin: 0 auto; }
+    h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; }
+    .group-selector { background: white; border-radius: 12px; padding: 12px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    select { width: 100%; padding: 12px; font-size: 16px; border-radius: 8px; border: 1px solid #ccc; background: white; }
+    .day-card { background: white; border-radius: 12px; margin-bottom: 20px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .day-header { background: #007aff; color: white; padding: 12px 16px; font-weight: 600; font-size: 18px; }
+    .pair { border-bottom: 1px solid #e5e5ea; padding: 12px 16px; display: flex; justify-content: space-between; }
+    .pair:last-child { border-bottom: none; }
+    .pair-number { font-weight: 600; width: 60px; }
+    .room { width: 80px; color: #666; }
+    .teacher { flex: 1; text-align: right; color: #666; }
+    .empty { padding: 16px; text-align: center; color: #888; }
+    button { background: #007aff; color: white; border: none; padding: 12px 20px; border-radius: 8px; font-size: 16px; margin-top: 10px; width: 100%; }
+    .notification-permission { background: #ff9500; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>📅 Расписание</h1>
+  <div class="group-selector">
+    <label for="group">Ваша группа:</label>
+    <select id="group"></select>
+    <button id="saveGroupBtn">Сохранить группу</button>
+  </div>
+  <div id="todayCard" class="day-card">
+    <div class="day-header">Сегодня</div>
+    <div id="todayContent">Загрузка...</div>
+  </div>
+  <div id="tomorrowCard" class="day-card">
+    <div class="day-header">Завтра</div>
+    <div id="tomorrowContent">Загрузка...</div>
+  </div>
+  <button id="requestPermissionBtn" class="notification-permission">🔔 Включить уведомления</button>
+</div>
+
+<script>
+  // Определяем серверный URL (автоматически)
+  const API_BASE = window.location.origin;
+
+  // Получение даты в формате YYYY-MM-DD
+  function getDateStr(offsetDays = 0) {
+    const d = new Date();
+    d.setDate(d.getDate() + offsetDays);
+    return d.toISOString().slice(0,10);
+  }
+
+  // Загрузка расписания для группы и даты
+  async function loadSchedule(group, date, containerId) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = 'Загрузка...';
+    try {
+      const res = await fetch(`${API_BASE}/api/schedule/${encodeURIComponent(group)}/${date}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      if (data.length === 0) {
+        container.innerHTML = '<div class="empty">Пар нет</div>';
+        return;
+      }
+      let html = '';
+      data.forEach(pair => {
+        html += `<div class="pair">
+          <span class="pair-number">${pair.pair_number}</span>
+          <span class="room">${pair.room}</span>
+          <span class="teacher">${pair.teacher}</span>
+        </div>`;
+      });
+      container.innerHTML = html;
+    } catch (err) {
+      container.innerHTML = '<div class="empty">Ошибка загрузки</div>';
+    }
+  }
+
+  // Сохранение группы в localStorage и загрузка расписания
+  let currentGroup = localStorage.getItem('userGroup') || '';
+  function updateSchedule() {
+    if (!currentGroup) return;
+    loadSchedule(currentGroup, getDateStr(0), 'todayContent');
+    loadSchedule(currentGroup, getDateStr(1), 'tomorrowContent');
+  }
+
+  // Заполнение выпадающего списка групп (получаем из расписания на сегодня)
+  async function loadGroups() {
+    // Простой способ: запрашиваем расписание для сегодня без группы (но у нас нет такого API)
+    // Поэтому сделаем так: будем собирать группы из данных расписания, когда загрузим расписание для всех групп.
+    // Но для упрощения, пусть пользователь вводит группу вручную в select.
+    // Мы добавим опцию "Другая", и кнопку для ввода.
+    // Но для удобства, можно сначала получить список групп из базы. Для этого добавим API /api/groups.
+    // Я допишу на сервере простой эндпоинт.
+    // Пока предложу пользователю ввести группу в поле input.
+    const select = document.getElementById('group');
+    // Здесь можно было бы загрузить список групп, но для простоты я сделаю текстовый ввод.
+    // Изменим select на input.
+  }
+
+  // Сохранить группу
+  document.getElementById('saveGroupBtn').onclick = () => {
+    const select = document.getElementById('group');
+    let newGroup = select.value;
+    if (newGroup) {
+      localStorage.setItem('userGroup', newGroup);
+      currentGroup = newGroup;
+      updateSchedule();
+    } else {
+      alert('Введите группу');
+    }
+  };
+
+  // Инициализация интерфейса выбора группы (используем input)
+  const groupInput = document.createElement('input');
+  groupInput.type = 'text';
+  groupInput.placeholder = 'Введите вашу группу (например, 111)';
+  groupInput.value = currentGroup;
+  groupInput.style.width = '100%';
+  groupInput.style.padding = '12px';
+  groupInput.style.fontSize = '16px';
+  groupInput.style.borderRadius = '8px';
+  groupInput.style.border = '1px solid #ccc';
+  groupInput.style.marginBottom = '10px';
+  const groupSelectorDiv = document.querySelector('.group-selector');
+  const oldSelect = document.getElementById('group');
+  oldSelect.replaceWith(groupInput);
+  document.getElementById('saveGroupBtn').onclick = () => {
+    const newGroup = groupInput.value.trim();
+    if (newGroup) {
+      localStorage.setItem('userGroup', newGroup);
+      currentGroup = newGroup;
+      updateSchedule();
+    } else {
+      alert('Введите группу');
+    }
+  };
+
+  // Восстановление группы
+  if (currentGroup) {
+    groupInput.value = currentGroup;
+    updateSchedule();
+  }
+
+  // ----- Push-уведомления -----
+  async function subscribeUser() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      alert('Push-уведомления не поддерживаются в этом браузере');
+      return;
+    }
+    const registration = await navigator.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    if (subscription) {
+      // уже подписан
+      return;
+    }
+    const publicKeyResponse = await fetch(`${API_BASE}/api/public-key`);
+    const { publicKey } = await publicKeyResponse.json();
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: publicKey
+    });
+    // Отправляем подписку на сервер
+    await fetch(`${API_BASE}/api/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(subscription)
+    });
+    alert('Уведомления включены!');
+  }
+
+  document.getElementById('requestPermissionBtn').onclick = async () => {
+    const permission = await Notification.requestPermission();
+    if (permission === 'granted') {
+      await subscribeUser();
+    } else {
+      alert('Разрешение не получено');
+    }
+  };
+
+  // Регистрация Service Worker
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').then(reg => {
+      console.log('SW registered', reg);
+    }).catch(err => console.error('SW reg error', err));
+  }
+</script>
+</body>
+</html>
